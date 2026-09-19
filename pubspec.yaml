@@ -1,0 +1,32 @@
+name: vorzela_store
+description: Durable encrypted NoSQL document store for Flutter — CBOR+zlib+AES-GCM, no Hive/SQL.
+version: 0.0.1
+homepage: https://github.com/vorzela/vorzela_store
+repository: https://github.com/vorzela/vorzela_store
+issue_tracker: https://github.com/vorzela/vorzela_store/issues
+license: MIT
+publish_to: none
+
+environment:
+  sdk: ^3.3.0
+  flutter: ">=3.16.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cbor: ^6.3.4
+  cryptography: ^2.7.0
+  flutter_secure_storage: ^9.2.4
+  path: ^1.9.0
+  path_provider: ^2.1.5
+  vorzela_json:
+    git:
+      url: https://github.com/vorzela/vorzela_json.git
+      ref: v0.0.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
