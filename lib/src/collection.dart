@@ -113,13 +113,20 @@ class VorzCollection<T> {
 
     await _engine.putAll(name, records);
 
-    for (final e in maps.entries) {
+    // Only the last key triggers an index commit — an N-document batch
+    // does one index flush instead of N full index rewrites.
+    final mapKeys = maps.keys.toList();
+    for (var i = 0; i < mapKeys.length; i++) {
+      final k = mapKeys[i];
       await _engine.setIndexValues(
         name,
-        e.key,
-        oldValues: olds[e.key],
-        newValues: _indexMap(e.value),
+        k,
+        oldValues: olds[k],
+        newValues: _indexMap(maps[k]!),
+        commit: i == mapKeys.length - 1,
       );
+    }
+    for (final e in maps.entries) {
       _emit(e.key, entries[e.key]);
     }
   }

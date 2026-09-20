@@ -236,6 +236,49 @@ void main() {
       await store2.close();
     });
 
+    test('concurrent puts do not corrupt the data file', () async {
+      final dek = MemoryDekStore();
+      final keyBytes = List<int>.generate(32, (i) => i + 9);
+      await dek.write('app', Uint8List.fromList(keyBytes));
+
+      final store = await VorzStore.open(
+        name: 'app',
+        directory: dir,
+        dekStore: dek,
+        secretKey: SecretKey(keyBytes),
+      );
+      final col = await store.maps('docs');
+
+      // Fire many overlapping writes without awaiting between them — before
+      // the per-collection lock, these could race on the same file offset
+      // and corrupt or lose records.
+      await Future.wait([
+        for (var i = 0; i < 50; i++)
+          col.put('k$i', {'v': 'value-$i', 'pad': 'x' * (i % 7) * 30}),
+      ]);
+
+      for (var i = 0; i < 50; i++) {
+        final v = await col.get('k$i');
+        expect(v?['v'], 'value-$i');
+      }
+      await store.close();
+
+      // Reopen from disk to make sure the index/data survived intact too,
+      // not just the in-memory view.
+      final store2 = await VorzStore.open(
+        name: 'app',
+        directory: dir,
+        dekStore: dek,
+        secretKey: SecretKey(keyBytes),
+      );
+      final col2 = await store2.maps('docs');
+      for (var i = 0; i < 50; i++) {
+        final v = await col2.get('k$i');
+        expect(v?['v'], 'value-$i');
+      }
+      await store2.close();
+    });
+
     test('wipeKeys makes data unreadable', () async {
       final dek = MemoryDekStore();
       final keyBytes = List<int>.generate(32, (i) => 3);
@@ -256,8 +299,17 @@ void main() {
         directory: dir,
         dekStore: dek,
       );
-      final col = await store2.maps('docs');
-      expect(() => col.get('k'), throwsA(anything));
+      // The index file is now encrypted too (previously it was plaintext
+      // JSON, which leaked indexed field values even after wipeKeys()), so
+      // a wiped/regenerated DEK fails as soon as the collection's index is
+      // read — not just later on individual record reads.
+      Object? openedWithWrongKey;
+      try {
+        await store2.maps('docs');
+      } catch (e) {
+        openedWithWrongKey = e;
+      }
+      expect(openedWithWrongKey, isA<SecretBoxAuthenticationError>());
       await store2.close();
     });
   });

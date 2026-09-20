@@ -23,11 +23,17 @@ abstract class StoreEngine {
   );
 
   /// Update equality indexes for [key] from old/new field maps (string values).
+  ///
+  /// [commit] controls whether the on-disk index is flushed immediately.
+  /// Batch callers (e.g. [VorzCollection.putAll]) pass `commit: false` for
+  /// every entry but the last so an N-document batch does one index flush
+  /// instead of N.
   Future<void> setIndexValues(
     String collection,
     String key, {
     Map<String, String>? oldValues,
     Map<String, String>? newValues,
+    bool commit = true,
   });
 
   Future<Map<String, String>?> indexValues(String collection, String key);

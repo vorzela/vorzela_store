@@ -26,6 +26,11 @@ class StoreCodec {
   final int compressThreshold;
   final bool encrypted;
 
+  /// The key this codec encrypts/decrypts with, if any. Exposed so other
+  /// engines on the same store (e.g. [VorzBlobStore]) can share it instead
+  /// of each needing their own key plumbed through separately.
+  SecretKey? get secretKey => _secretKey;
+
   final _aes = AesGcm.with256bits();
   final _zlib = ZLibCodec(level: 6);
 
@@ -35,11 +40,35 @@ class StoreCodec {
     required List<int> aad,
   }) async {
     final cborBytes = Uint8List.fromList(cbor.cbor.encode(_cborSafe(map)));
-    var payload = cborBytes;
+    return encodeRaw(cborBytes, aad: aad);
+  }
+
+  /// Decode durable bytes back to a map.
+  Future<Map<String, dynamic>> decode(
+    Uint8List bytes, {
+    required List<int> aad,
+  }) async {
+    final payload = await decodeRaw(bytes, aad: aad);
+    final decoded = cbor.cbor.decode(payload);
+    if (decoded is! Map) {
+      throw const FormatException('store record is not a map');
+    }
+    return _asStringKeyedMap(decoded);
+  }
+
+  /// Compress (if large enough) + encrypt (if enabled) arbitrary bytes.
+  /// Used for record payloads (via [encode]) and for the collection index,
+  /// so index metadata gets the same at-rest protection as records instead
+  /// of sitting on disk as plaintext JSON.
+  Future<Uint8List> encodeRaw(
+    Uint8List payload, {
+    required List<int> aad,
+  }) async {
+    var p = payload;
     var flags = 0;
 
-    if (payload.length >= compressThreshold) {
-      payload = Uint8List.fromList(_zlib.encode(payload));
+    if (p.length >= compressThreshold) {
+      p = Uint8List.fromList(_zlib.encode(p));
       flags |= flagCompressed;
     }
 
@@ -50,7 +79,7 @@ class StoreCodec {
       }
       flags |= flagEncrypted;
       final box = await _aes.encrypt(
-        payload,
+        p,
         secretKey: key,
         aad: aad,
       );
@@ -62,14 +91,15 @@ class StoreCodec {
       return out;
     }
 
-    final out = Uint8List(1 + payload.length);
+    final out = Uint8List(1 + p.length);
     out[0] = flags;
-    out.setRange(1, out.length, payload);
+    out.setRange(1, out.length, p);
     return out;
   }
 
-  /// Decode durable bytes back to a map.
-  Future<Map<String, dynamic>> decode(
+  /// Inverse of [encodeRaw]: returns the raw (decompressed, decrypted)
+  /// payload bytes without assuming they're CBOR.
+  Future<Uint8List> decodeRaw(
     Uint8List bytes, {
     required List<int> aad,
   }) async {
@@ -102,11 +132,7 @@ class StoreCodec {
       payload = Uint8List.fromList(_zlib.decode(payload));
     }
 
-    final decoded = cbor.cbor.decode(payload);
-    if (decoded is! Map) {
-      throw const FormatException('store record is not a map');
-    }
-    return _asStringKeyedMap(decoded);
+    return Uint8List.fromList(payload);
   }
 
   /// Compare storage size vs JSON+gzip for the same map (tests / docs).

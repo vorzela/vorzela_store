@@ -65,6 +65,7 @@ class MemoryEngine implements StoreEngine {
     String key, {
     Map<String, String>? oldValues,
     Map<String, String>? newValues,
+    bool commit = true,
   }) async {
     final eq = _eq[collection];
     if (eq == null) return;

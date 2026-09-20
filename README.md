@@ -83,8 +83,57 @@ Growth control:
 1. **Slot reuse** when an update fits the previous slot
 2. **Tombstones** for deletes / oversized updates
 3. **Auto-compact** when dead space ≥ 25% or ≥ 4 MiB (also `store.compact()`)
+4. **Batched index commits** — `putAll()` does one index-file rewrite for
+   the whole batch, not one per document
+5. All engine operations on a collection are serialized (per-collection
+   async lock), so concurrent `put`/`delete`/`compact` calls can't race and
+   corrupt the `.dat`/`.idx` files
 
-Do not store media blobs — keep URLs and put binaries in object storage.
+For files and media (images, PDFs, downloaded attachments) too large or
+write-heavy for the document engine, use `VorzBlobStore` instead of putting
+them through a regular collection — see below.
+
+---
+
+## Files / media (offline + online)
+
+`VorzBlobStore` stores arbitrary-size binary blobs alongside your regular
+data, encrypted chunk-by-chunk (default 64 KiB) so a large file never needs
+to sit fully in memory to be written or read. It's built for the common
+"cache what I've downloaded from my backend, work offline" pattern —
+sync state is just metadata you set as your own upload/download logic runs.
+
+```dart
+final store = await VorzStore.open(name: 'app');
+final blobs = await VorzBlobStore.open(store, maxTotalBytes: 200 * 1024 * 1024);
+
+// Download and cache (e.g. inside your own http streaming call):
+await blobs.putStream(
+  'avatar:u1',
+  httpResponse.stream,
+  mimeType: 'image/jpeg',
+  remoteUrl: 'https://api.example.com/avatars/u1.jpg',
+  syncState: BlobSyncState.synced,
+);
+
+// Or from bytes you already have:
+await blobs.putBytes('doc:42', fileBytes, mimeType: 'application/pdf');
+
+// Read back (offline-safe — no network involved):
+final bytes = await blobs.getBytes('avatar:u1');
+final stream = blobs.getStream('doc:42'); // for large files
+
+// Know a file exists on your backend before downloading it:
+await blobs.registerRemote('doc:99', size: 1_048_576, remoteUrl: '...');
+```
+
+With `maxTotalBytes` set, the least-recently-used **re-fetchable** blobs
+(`BlobSyncState.synced` or anything with a `remoteUrl`) are evicted first
+when the cap is exceeded. Blobs with `BlobSyncState.local` and no
+`remoteUrl` — i.e. not backed up anywhere yet — are never auto-evicted.
+
+Your backend database stays the source of truth; `VorzBlobStore` is purely
+the on-device cache/offline copy.
 
 ---
 
@@ -95,6 +144,8 @@ Do not store media blobs — keep URLs and put binaries in object storage.
 | DEK (256-bit) | Keychain / Keystore via `flutter_secure_storage` |
 | Values | AES-256-GCM, unique nonce per record |
 | AAD | `dbName\|collection\|key\|schemaVersion` |
+| Index (`.idx`) | Same compress+encrypt pipeline as record values — indexed field values are not plaintext on disk |
+| Blobs (`VorzBlobStore`) | AES-256-GCM per 64 KiB chunk, unique nonce per chunk, defaults to the store's own DEK |
 
 Protects disk / backup extraction. A rooted live process can still read memory.
 

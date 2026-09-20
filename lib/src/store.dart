@@ -38,6 +38,13 @@ class VorzStore {
   final Map<String, VorzCollection<dynamic>> _collections = {};
   bool _closed = false;
 
+  /// The store's data-encryption key, if [encrypted]. `null` for an
+  /// unencrypted store. Other engines built on top of this store's
+  /// directory (e.g. [VorzBlobStore]) use this by default so blobs get the
+  /// same at-rest protection as documents instead of silently landing on
+  /// disk in plaintext.
+  SecretKey? get dek => _codec.secretKey;
+
   /// Open a store under Application Support (survives reboot).
   ///
   /// Pass [directory] to override (tests). Pass [dekStore] / [engine] for
@@ -81,6 +88,12 @@ class VorzStore {
 
     final codec = StoreCodec(secretKey: dek, encrypted: encrypted);
     final storeEngine = engine ?? FileEngine(dir);
+    if (storeEngine is FileEngine) {
+      // Index metadata (keys, offsets, indexed field values) gets the same
+      // at-rest protection as record payloads instead of sitting on disk
+      // as plaintext JSON.
+      storeEngine.attachIndexCodec(codec);
+    }
     if (compactOnOpen && storeEngine is FileEngine) {
       // Collections opened lazily; compact after first use via store.compact().
     }

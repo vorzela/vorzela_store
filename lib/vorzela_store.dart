@@ -3,6 +3,7 @@
 /// CBOR + zlib + AES-GCM on disk. No Hive / SQL.
 library;
 
+export 'src/blob_store.dart';
 export 'src/codec.dart';
 export 'src/collection.dart';
 export 'src/engine.dart';

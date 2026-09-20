@@ -14,9 +14,21 @@ class VorzQuery<T> {
   bool _sortDesc = false;
   int? _limit;
 
+  /// Equality filter on an indexed field.
+  ///
+  /// [value] must not be `null` — a null would previously look like "no
+  /// filter" and silently fall back to a full scan. Pass a concrete value
+  /// (e.g. empty string) if that is what you mean to match.
   VorzQuery<T> whereEq(String field, Object? value) {
+    if (value == null) {
+      throw ArgumentError.value(
+        value,
+        'value',
+        'whereEq does not accept null; that would silently full-scan',
+      );
+    }
     _field = field;
-    _eqValue = value?.toString();
+    _eqValue = value.toString();
     return this;
   }
 
