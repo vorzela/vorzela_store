@@ -279,6 +279,56 @@ void main() {
       await store2.close();
     });
 
+    test('orphan trailing bytes after crash do not shift new appends', () async {
+      final dek = MemoryDekStore();
+      final keyBytes = List<int>.generate(32, (i) => 11);
+      final key = SecretKey(keyBytes);
+      await dek.write('app', Uint8List.fromList(keyBytes));
+
+      final store1 = await VorzStore.open(
+        name: 'app',
+        directory: dir,
+        dekStore: dek,
+        secretKey: key,
+      );
+      final col1 = await store1.maps('docs');
+      await col1.put('a', {'n': 1});
+      await store1.close();
+
+      // Simulate: append completed, idx commit did not — junk past logical EOF.
+      final dat = File('${dir.path}/docs.dat');
+      final before = await dat.length();
+      await dat.writeAsBytes(
+        [...await dat.readAsBytes(), 9, 9, 9, 9, 9, 9, 9, 9],
+        flush: true,
+      );
+      expect(await dat.length(), greaterThan(before));
+
+      final store2 = await VorzStore.open(
+        name: 'app',
+        directory: dir,
+        dekStore: dek,
+        secretKey: key,
+      );
+      final col2 = await store2.maps('docs');
+      expect((await col2.get('a'))?['n'], 1);
+      await col2.put('b', {'n': 2});
+      expect((await col2.get('a'))?['n'], 1);
+      expect((await col2.get('b'))?['n'], 2);
+      await store2.close();
+
+      final store3 = await VorzStore.open(
+        name: 'app',
+        directory: dir,
+        dekStore: dek,
+        secretKey: key,
+      );
+      final col3 = await store3.maps('docs');
+      expect((await col3.get('a'))?['n'], 1);
+      expect((await col3.get('b'))?['n'], 2);
+      await store3.close();
+    });
+
     test('wipeKeys makes data unreadable', () async {
       final dek = MemoryDekStore();
       final keyBytes = List<int>.generate(32, (i) => 3);

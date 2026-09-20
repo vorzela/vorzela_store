@@ -1,3 +1,20 @@
+## 0.0.3
+
+**Fixes (durability / crash windows)**
+- Index replace no longer deletes the live `.idx` before renaming the temp
+  file into place (POSIX atomic rename-over; Windows backup-then-rename).
+  The old delete-then-rename left a crash window with **no index on disk**.
+- Compact no longer deletes the live `.dat` before the new file is in place;
+  uses the same atomic replace helper.
+- `put` / `delete` / `putAll` now commit **ciphertext + equality indexes in
+  one** index flush (closes the window where data was durable but indexes
+  were still stale after a crash).
+- On open, logical `fileSize` is restored from the committed index (not raw
+  EOF), so orphan trailing bytes after a crash-before-idx-commit do not
+  shift later appends. Slots past EOF are dropped.
+- Re-opening a collection closes any prior RAF first (FD leak).
+- Blob overwrite uses rename-over on POSIX instead of delete-then-rename.
+
 ## 0.0.2
 
 **Fixes**

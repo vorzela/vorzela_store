@@ -22,9 +22,47 @@ class MemoryEngine implements StoreEngine {
         });
   }
 
+  void _applyIndex(
+    String collection,
+    String key, {
+    Map<String, String>? oldValues,
+    Map<String, String>? newValues,
+  }) {
+    final eq = _eq[collection];
+    if (eq == null) return;
+    if (oldValues != null) {
+      for (final e in oldValues.entries) {
+        eq[e.key]?[e.value]?.remove(key);
+      }
+    }
+    if (newValues != null) {
+      _docIndexes[collection]![key] = Map.of(newValues);
+      for (final e in newValues.entries) {
+        eq.putIfAbsent(e.key, () => {});
+        eq[e.key]!.putIfAbsent(e.value, () => {}).add(key);
+      }
+    } else if (oldValues != null) {
+      _docIndexes[collection]?.remove(key);
+    }
+  }
+
   @override
-  Future<void> put(String collection, String key, Uint8List record) async {
+  Future<void> put(
+    String collection,
+    String key,
+    Uint8List record, {
+    Map<String, String>? oldIndex,
+    Map<String, String>? newIndex,
+  }) async {
     _data[collection]![key] = Uint8List.fromList(record);
+    if (oldIndex != null || newIndex != null) {
+      _applyIndex(
+        collection,
+        key,
+        oldValues: oldIndex,
+        newValues: newIndex,
+      );
+    }
   }
 
   @override
@@ -34,14 +72,30 @@ class MemoryEngine implements StoreEngine {
   }
 
   @override
-  Future<void> delete(String collection, String key) async {
+  Future<void> delete(
+    String collection,
+    String key, {
+    Map<String, String>? oldIndex,
+  }) async {
     _data[collection]?.remove(key);
+    _applyIndex(collection, key, oldValues: oldIndex, newValues: null);
   }
 
   @override
-  Future<void> putAll(String collection, Map<String, Uint8List> records) async {
+  Future<void> putAll(
+    String collection,
+    Map<String, Uint8List> records, {
+    Map<String, Map<String, String>?>? oldIndexes,
+    Map<String, Map<String, String>?>? newIndexes,
+  }) async {
     for (final e in records.entries) {
-      await put(collection, e.key, e.value);
+      await put(
+        collection,
+        e.key,
+        e.value,
+        oldIndex: oldIndexes?[e.key],
+        newIndex: newIndexes?[e.key],
+      );
     }
   }
 
@@ -67,23 +121,12 @@ class MemoryEngine implements StoreEngine {
     Map<String, String>? newValues,
     bool commit = true,
   }) async {
-    final eq = _eq[collection];
-    if (eq == null) return;
-
-    if (oldValues != null) {
-      for (final e in oldValues.entries) {
-        eq[e.key]?[e.value]?.remove(key);
-      }
-    }
-    if (newValues != null) {
-      _docIndexes[collection]![key] = Map.of(newValues);
-      for (final e in newValues.entries) {
-        eq.putIfAbsent(e.key, () => {});
-        eq[e.key]!.putIfAbsent(e.value, () => {}).add(key);
-      }
-    } else {
-      _docIndexes[collection]?.remove(key);
-    }
+    _applyIndex(
+      collection,
+      key,
+      oldValues: oldValues,
+      newValues: newValues,
+    );
   }
 
   @override

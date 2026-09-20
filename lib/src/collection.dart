@@ -39,7 +39,6 @@ class VorzCollection<T> {
 
   final Map<String, StreamController<T?>> _watchers = {};
 
-  /// Exposed for [VorzQuery].
   StoreEngine get engine => _engine;
   FromJson<T> get fromJson => _fromJson;
 
@@ -68,12 +67,13 @@ class VorzCollection<T> {
     final map = _asMap(value);
     final oldIdx = await _engine.indexValues(name, key);
     final record = await _codec.encode(map, aad: _aad(key));
-    await _engine.put(name, key, record);
-    await _engine.setIndexValues(
+    // One engine commit: ciphertext + equality indexes together.
+    await _engine.put(
       name,
       key,
-      oldValues: oldIdx,
-      newValues: _indexMap(map),
+      record,
+      oldIndex: oldIdx,
+      newIndex: _indexMap(map),
     );
     _emit(key, value);
   }
@@ -87,58 +87,40 @@ class VorzCollection<T> {
 
   Future<void> delete(String key) async {
     final oldIdx = await _engine.indexValues(name, key);
-    await _engine.delete(name, key);
-    if (oldIdx != null) {
-      await _engine.setIndexValues(
-        name,
-        key,
-        oldValues: oldIdx,
-        newValues: null,
-      );
-    }
+    await _engine.delete(name, key, oldIndex: oldIdx);
     _emit(key, null);
   }
 
   Future<void> putAll(Map<String, T> entries) async {
+    if (entries.isEmpty) return;
     final records = <String, Uint8List>{};
-    final maps = <String, Map<String, dynamic>>{};
     final olds = <String, Map<String, String>?>{};
+    final news = <String, Map<String, String>?>{};
 
     for (final e in entries.entries) {
       final map = _asMap(e.value);
-      maps[e.key] = map;
       olds[e.key] = await _engine.indexValues(name, e.key);
+      news[e.key] = _indexMap(map);
       records[e.key] = await _codec.encode(map, aad: _aad(e.key));
     }
 
-    await _engine.putAll(name, records);
+    await _engine.putAll(
+      name,
+      records,
+      oldIndexes: olds,
+      newIndexes: news,
+    );
 
-    // Only the last key triggers an index commit — an N-document batch
-    // does one index flush instead of N full index rewrites.
-    final mapKeys = maps.keys.toList();
-    for (var i = 0; i < mapKeys.length; i++) {
-      final k = mapKeys[i];
-      await _engine.setIndexValues(
-        name,
-        k,
-        oldValues: olds[k],
-        newValues: _indexMap(maps[k]!),
-        commit: i == mapKeys.length - 1,
-      );
-    }
-    for (final e in maps.entries) {
-      _emit(e.key, entries[e.key]);
+    for (final e in entries.entries) {
+      _emit(e.key, e.value);
     }
   }
 
   void _emit(String key, T? value) {
     final c = _watchers[key];
-    if (c != null && !c.isClosed) {
-      c.add(value);
-    }
+    if (c != null && !c.isClosed) c.add(value);
   }
 
-  /// Watch a single key. Emits current value first, then updates.
   Stream<T?> watch(String key) {
     final existing = _watchers[key];
     if (existing != null) return existing.stream;

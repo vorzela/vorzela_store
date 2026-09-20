@@ -15,14 +15,7 @@ class _Slot {
   int length;
 }
 
-/// FIFO async mutex. Dart is single-threaded, but `await` points let
-/// unrelated calls interleave; every public [FileEngine] operation on a
-/// given collection runs inside this lock so a `put` can never observe or
-/// clobber half-finished state from a concurrent `put`/`delete`/`compact`
-/// on the same collection. Internal helpers that are only ever called from
-/// inside an already-locked operation (e.g. `compact` reading a record, or
-/// `put` auto-compacting) call the unlocked `_*` variants directly —
-/// re-entering `run()` from inside itself would deadlock.
+/// FIFO async mutex — see class doc on [FileEngine].
 class _Mutex {
   Future<void> _tail = Future.value();
 
@@ -41,6 +34,15 @@ class _Mutex {
 }
 
 /// Pure-Dart durable engine: append/slot-reuse `.dat` + crash-safe `.idx`.
+///
+/// Durability rules (the usual hand-rolled-DB footguns we close here):
+/// 1. Per-collection async lock — no interleaved puts at await points.
+/// 2. Flush `.dat` before committing `.idx`.
+/// 3. Replace `.idx` via write-temp + rename (POSIX atomic); never
+///    delete-then-rename (crash window with no index).
+/// 4. Data + equality indexes share one index commit on put/delete/putAll.
+/// 5. Logical `fileSize` comes from the index (trailing crash junk ignored).
+/// 6. Compact uses rename-over / backup dance — never delete live `.dat` first.
 class FileEngine implements StoreEngine {
   FileEngine(
     this.root, {
@@ -61,11 +63,6 @@ class FileEngine implements StoreEngine {
   final Map<String, RandomAccessFile> _rafs = {};
   final Map<String, _Mutex> _locks = {};
 
-  /// Set by [VorzStore.open] so the index file gets the same
-  /// compress+encrypt treatment as records instead of sitting on disk as
-  /// plaintext JSON (which used to leak indexed field values even for an
-  /// "encrypted" store). Left null the index is plain JSON — used by tests
-  /// that construct a [FileEngine] directly without a store.
   StoreCodec? _indexCodec;
 
   static const int _lenHeader = 4;
@@ -74,7 +71,6 @@ class FileEngine implements StoreEngine {
   File _idx(String c) => File(p.join(root.path, '$c.idx'));
   File _idxTmp(String c) => File(p.join(root.path, '$c.idx.tmp'));
 
-  /// Wires up index-file encryption. Call before any collection is opened.
   void attachIndexCodec(StoreCodec codec) {
     _indexCodec = codec;
   }
@@ -84,6 +80,32 @@ class FileEngine implements StoreEngine {
 
   Future<T> _locked<T>(String collection, Future<T> Function() action) =>
       _lockFor(collection).run(action);
+
+  /// Atomically replace [target] with [tmp] (tmp must already be fully written
+  /// and flushed). On POSIX, `rename` replaces without a delete-first window.
+  /// On Windows, rename-over is not allowed — we rename the live file aside,
+  /// then rename tmp into place, restoring on failure.
+  Future<void> _atomicReplace(File tmp, File target) async {
+    if (Platform.isWindows) {
+      final bak = File('${target.path}.bak');
+      if (await bak.exists()) await bak.delete();
+      if (await target.exists()) {
+        await target.rename(bak.path);
+      }
+      try {
+        await tmp.rename(target.path);
+        if (await bak.exists()) await bak.delete();
+      } catch (_) {
+        if (await bak.exists() && !await target.exists()) {
+          await bak.rename(target.path);
+        }
+        rethrow;
+      }
+      return;
+    }
+    // Linux/macOS/iOS/Android: rename onto existing path is atomic replace.
+    await tmp.rename(target.path);
+  }
 
   @override
   Future<void> openCollection(
@@ -107,7 +129,43 @@ class FileEngine implements StoreEngine {
       if (!await dat.exists()) {
         await dat.create(recursive: true);
       }
-      _fileSize[name] = await dat.length();
+
+      // Drop slots that point past EOF (truncated data file after crash/copy).
+      final diskLen = await dat.length();
+      final entries = _entries[name]!;
+      final dead = <String>[];
+      for (final e in entries.entries) {
+        if (e.value.offset + e.value.length > diskLen) {
+          dead.add(e.key);
+        }
+      }
+      for (final k in dead) {
+        final slot = entries.remove(k);
+        if (slot != null) {
+          _deadBytes[name] = (_deadBytes[name] ?? 0) + slot.length;
+        }
+        final old = _docIndexes[name]?.remove(k);
+        if (old != null) {
+          _applyIndexUnlocked(name, k, oldValues: old, newValues: null);
+        }
+      }
+      if (dead.isNotEmpty) {
+        await _commitIndex(name);
+      }
+
+      // Reuse logical size from index — ignore trailing junk past last commit.
+      // (A crash after append but before idx commit leaves orphan bytes; the
+      // next append must continue from the last *committed* end, not EOF.)
+      var logical = _fileSize[name] ?? 0;
+      for (final s in entries.values) {
+        final end = s.offset + s.length;
+        if (end > logical) logical = end;
+      }
+      if (logical > diskLen) logical = diskLen;
+      _fileSize[name] = logical;
+
+      // Avoid leaking a second handle if openCollection is called again.
+      await _rafs.remove(name)?.close();
       _rafs[name] = await dat.open(mode: FileMode.append);
     });
   }
@@ -117,17 +175,18 @@ class FileEngine implements StoreEngine {
   Future<void> _loadIndex(String name) async {
     final idx = _idx(name);
     final tmp = _idxTmp(name);
-    // Prefer committed idx; if only tmp exists (crash), ignore tmp.
     if (!await idx.exists()) {
       _entries[name] = {};
       _docIndexes[name] = {};
       _deadBytes[name] = 0;
+      _fileSize[name] = 0;
       if (await tmp.exists()) await tmp.delete();
       return;
     }
     final raw = await idx.readAsBytes();
     if (raw.isEmpty) {
       _entries[name] = {};
+      _fileSize[name] = 0;
       if (await tmp.exists()) await tmp.delete();
       return;
     }
@@ -149,6 +208,7 @@ class FileEngine implements StoreEngine {
     }
     _entries[name] = entries;
     _deadBytes[name] = map['deadBytes'] as int? ?? 0;
+    _fileSize[name] = map['fileSize'] as int? ?? 0;
 
     final docs = <String, Map<String, String>>{};
     final rawDocs = map['docIndexes'] as Map<String, dynamic>? ?? {};
@@ -160,7 +220,6 @@ class FileEngine implements StoreEngine {
     }
     _docIndexes[name] = docs;
 
-    // Rebuild equality sets from docIndexes.
     final eq = <String, Map<String, Set<String>>>{
       for (final f in _indexFields[name]!) f: <String, Set<String>>{},
     };
@@ -172,9 +231,7 @@ class FileEngine implements StoreEngine {
     }
     _eq[name] = eq;
 
-    if (await tmp.exists()) {
-      await tmp.delete();
-    }
+    if (await tmp.exists()) await tmp.delete();
   }
 
   Future<void> _commitIndex(String name) async {
@@ -194,19 +251,13 @@ class FileEngine implements StoreEngine {
         : jsonBytes;
 
     final tmp = _idxTmp(name);
-    final idx = _idx(name);
     await tmp.writeAsBytes(outBytes, flush: true);
-    if (await idx.exists()) {
-      await idx.delete();
-    }
-    await tmp.rename(idx.path);
+    await _atomicReplace(tmp, _idx(name));
   }
 
   Future<void> _flushDat(String name) async {
     final raf = _rafs[name];
-    if (raf != null) {
-      await raf.flush();
-    }
+    if (raf != null) await raf.flush();
   }
 
   List<int> _encodeLength(int n) {
@@ -217,10 +268,48 @@ class FileEngine implements StoreEngine {
   int _decodeLength(Uint8List b) =>
       ByteData.sublistView(b).getUint32(0, Endian.big);
 
+  void _applyIndexUnlocked(
+    String collection,
+    String key, {
+    Map<String, String>? oldValues,
+    Map<String, String>? newValues,
+  }) {
+    final eq = _eq[collection];
+    if (eq == null) return;
+    if (oldValues != null) {
+      for (final e in oldValues.entries) {
+        eq[e.key]?[e.value]?.remove(key);
+      }
+    }
+    if (newValues != null) {
+      _docIndexes[collection]![key] = Map.of(newValues);
+      for (final e in newValues.entries) {
+        eq.putIfAbsent(e.key, () => {});
+        eq[e.key]!.putIfAbsent(e.value, () => {}).add(key);
+      }
+    } else if (oldValues != null) {
+      _docIndexes[collection]?.remove(key);
+    }
+  }
+
   @override
-  Future<void> put(String collection, String key, Uint8List record) {
+  Future<void> put(
+    String collection,
+    String key,
+    Uint8List record, {
+    Map<String, String>? oldIndex,
+    Map<String, String>? newIndex,
+  }) {
     return _locked(collection, () async {
       await _putNoCommit(collection, key, record);
+      if (oldIndex != null || newIndex != null) {
+        _applyIndexUnlocked(
+          collection,
+          key,
+          oldValues: oldIndex,
+          newValues: newIndex,
+        );
+      }
       await _flushDat(collection);
       await _commitIndex(collection);
       await _compactIfNeeded(collection);
@@ -245,9 +334,6 @@ class FileEngine implements StoreEngine {
     return raf;
   }
 
-  /// Write a length-prefixed record at [offset] without truncating the
-  /// file, reusing the collection's persistent handle instead of
-  /// open/close-per-write.
   Future<void> _writeAt(
     String collection,
     int offset,
@@ -265,7 +351,6 @@ class FileEngine implements StoreEngine {
     return _locked(collection, () => _readRecord(collection, key));
   }
 
-  /// Unlocked read, reusing the persistent handle.
   Future<Uint8List?> _readRecord(String collection, String key) async {
     final slot = _entries[collection]?[key];
     if (slot == null) return null;
@@ -278,20 +363,40 @@ class FileEngine implements StoreEngine {
     final lenBytes = await raf.read(4);
     if (lenBytes.length < 4) return null;
     final len = _decodeLength(Uint8List.fromList(lenBytes));
-    if (len < 0 || len > slot.length - _lenHeader) {
-      return null;
-    }
+    if (len < 0 || len > slot.length - _lenHeader) return null;
     final data = await raf.read(len);
     if (data.length < len) return null;
     return Uint8List.fromList(data);
   }
 
   @override
-  Future<void> delete(String collection, String key) {
+  Future<void> delete(
+    String collection,
+    String key, {
+    Map<String, String>? oldIndex,
+  }) {
     return _locked(collection, () async {
       final slot = _entries[collection]?.remove(key);
       if (slot != null) {
         _deadBytes[collection] = (_deadBytes[collection] ?? 0) + slot.length;
+      }
+      if (oldIndex != null) {
+        _applyIndexUnlocked(
+          collection,
+          key,
+          oldValues: oldIndex,
+          newValues: null,
+        );
+      } else {
+        final had = _docIndexes[collection]?.remove(key);
+        if (had != null) {
+          _applyIndexUnlocked(
+            collection,
+            key,
+            oldValues: had,
+            newValues: null,
+          );
+        }
       }
       await _commitIndex(collection);
       await _compactIfNeeded(collection);
@@ -299,10 +404,25 @@ class FileEngine implements StoreEngine {
   }
 
   @override
-  Future<void> putAll(String collection, Map<String, Uint8List> records) {
+  Future<void> putAll(
+    String collection,
+    Map<String, Uint8List> records, {
+    Map<String, Map<String, String>?>? oldIndexes,
+    Map<String, Map<String, String>?>? newIndexes,
+  }) {
     return _locked(collection, () async {
       for (final e in records.entries) {
         await _putNoCommit(collection, e.key, e.value);
+        final oldIdx = oldIndexes?[e.key];
+        final newIdx = newIndexes?[e.key];
+        if (oldIdx != null || newIdx != null) {
+          _applyIndexUnlocked(
+            collection,
+            e.key,
+            oldValues: oldIdx,
+            newValues: newIdx,
+          );
+        }
       }
       await _flushDat(collection);
       await _commitIndex(collection);
@@ -333,7 +453,7 @@ class FileEngine implements StoreEngine {
       _deadBytes[collection] = (_deadBytes[collection] ?? 0) + old.length;
     }
     final raf = await _appendRaf(collection);
-    final offset = _fileSize[collection] ?? await _dat(collection).length();
+    final offset = _fileSize[collection] ?? 0;
     await raf.setPosition(offset);
     await raf.writeFrom(_encodeLength(record.length));
     await raf.writeFrom(record);
@@ -341,22 +461,21 @@ class FileEngine implements StoreEngine {
     _fileSize[collection] = offset + frameLen;
   }
 
-  /// Auto-compact check used by write paths. Calls [_compactOne] directly
-  /// (never the locked public [compact]) since this always runs from
-  /// inside an already-locked operation.
   Future<void> _compactIfNeeded(String collection) async {
     final dead = _deadBytes[collection] ?? 0;
     final size = _fileSize[collection] ?? 0;
     if (size == 0) return;
-    if (dead >= autoCompactMinDeadBytes ||
-        dead / size >= autoCompactRatio) {
+    if (dead >= autoCompactMinDeadBytes || dead / size >= autoCompactRatio) {
       await _compactOne(collection);
     }
   }
 
   @override
   Future<List<String>> keys(String collection) {
-    return _locked(collection, () async => _entries[collection]?.keys.toList() ?? []);
+    return _locked(
+      collection,
+      () async => _entries[collection]?.keys.toList() ?? [],
+    );
   }
 
   @override
@@ -380,26 +499,13 @@ class FileEngine implements StoreEngine {
     bool commit = true,
   }) {
     return _locked(collection, () async {
-      final eq = _eq[collection];
-      if (eq == null) return;
-
-      if (oldValues != null) {
-        for (final e in oldValues.entries) {
-          eq[e.key]?[e.value]?.remove(key);
-        }
-      }
-      if (newValues != null) {
-        _docIndexes[collection]![key] = Map.of(newValues);
-        for (final e in newValues.entries) {
-          eq.putIfAbsent(e.key, () => {});
-          eq[e.key]!.putIfAbsent(e.value, () => {}).add(key);
-        }
-      } else {
-        _docIndexes[collection]?.remove(key);
-      }
-      if (commit) {
-        await _commitIndex(collection);
-      }
+      _applyIndexUnlocked(
+        collection,
+        key,
+        oldValues: oldValues,
+        newValues: newValues,
+      );
+      if (commit) await _commitIndex(collection);
     });
   }
 
@@ -424,21 +530,19 @@ class FileEngine implements StoreEngine {
     }
   }
 
-  /// Unlocked worker — only ever called while the collection's lock is
-  /// already held (by [compact] or by a write path's auto-compact check).
   Future<void> _compactOne(String name) async {
     final entries = _entries[name];
     if (entries == null) return;
 
-    // Close the cached append handle before rewriting.
     await _rafs.remove(name)?.close();
 
     final oldDat = _dat(name);
-    // Dedicated read-only handle for this pass — deliberately *not*
-    // `_appendRaf`/`_rafs[name]`, so we never end up with a cached handle
-    // still open on the file we're about to delete below.
-    final readRaf = await oldDat.open(mode: FileMode.read);
+    if (!await oldDat.exists()) {
+      _rafs[name] = await oldDat.open(mode: FileMode.append);
+      return;
+    }
 
+    final readRaf = await oldDat.open(mode: FileMode.read);
     final newDat = File(p.join(root.path, '$name.dat.new'));
     if (await newDat.exists()) await newDat.delete();
     final out = await newDat.open(mode: FileMode.write);
@@ -461,8 +565,10 @@ class FileEngine implements StoreEngine {
       await readRaf.close();
     }
 
-    if (await oldDat.exists()) await oldDat.delete();
-    await newDat.rename(oldDat.path);
+    // Swap data file first (atomic replace), then commit index that points
+    // at the new layout. Never delete the live .dat before the new one is
+    // in place — that was a crash window with no data file at all.
+    await _atomicReplace(newDat, oldDat);
 
     _entries[name] = newEntries;
     _deadBytes[name] = 0;
@@ -474,7 +580,9 @@ class FileEngine implements StoreEngine {
   @override
   Future<void> close() async {
     for (final raf in _rafs.values) {
-      await raf.close();
+      try {
+        await raf.close();
+      } catch (_) {}
     }
     _rafs.clear();
   }

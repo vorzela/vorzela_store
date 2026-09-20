@@ -4,13 +4,32 @@ import 'dart:typed_data';
 abstract class StoreEngine {
   Future<void> openCollection(String name, {List<String> indexFields = const []});
 
-  Future<void> put(String collection, String key, Uint8List record);
+  /// Write [record] and optionally update equality indexes in **one** index
+  /// commit (avoids a crash window where data is durable but indexes are not).
+  Future<void> put(
+    String collection,
+    String key,
+    Uint8List record, {
+    Map<String, String>? oldIndex,
+    Map<String, String>? newIndex,
+  });
 
   Future<Uint8List?> get(String collection, String key);
 
-  Future<void> delete(String collection, String key);
+  /// Remove [key] and clear its equality indexes in one index commit.
+  Future<void> delete(
+    String collection,
+    String key, {
+    Map<String, String>? oldIndex,
+  });
 
-  Future<void> putAll(String collection, Map<String, Uint8List> records);
+  /// Batch write + index updates, single index flush at the end.
+  Future<void> putAll(
+    String collection,
+    Map<String, Uint8List> records, {
+    Map<String, Map<String, String>?>? oldIndexes,
+    Map<String, Map<String, String>?>? newIndexes,
+  });
 
   /// All live keys in [collection].
   Future<List<String>> keys(String collection);
@@ -24,10 +43,8 @@ abstract class StoreEngine {
 
   /// Update equality indexes for [key] from old/new field maps (string values).
   ///
-  /// [commit] controls whether the on-disk index is flushed immediately.
-  /// Batch callers (e.g. [VorzCollection.putAll]) pass `commit: false` for
-  /// every entry but the last so an N-document batch does one index flush
-  /// instead of N.
+  /// Prefer passing indexes into [put] / [putAll] / [delete] so data + index
+  /// share one disk commit. This remains for rare out-of-band updates.
   Future<void> setIndexValues(
     String collection,
     String key, {
@@ -42,7 +59,7 @@ abstract class StoreEngine {
 
   Future<void> close();
 
-  /// Approximate on-disk bytes for [collection] (data file).
+  /// Approximate on-disk bytes for [collection] (logical data size).
   Future<int> dataFileSize(String collection);
 
   Future<int> deadBytes(String collection);

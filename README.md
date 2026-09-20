@@ -76,7 +76,12 @@ Files live under **Application Support** (not cache/tmp):
   <collection>.idx   # key → offset/length + equality indexes
 ```
 
-Durability: flush `.dat`, then atomically replace `.idx`. Index only points at flushed bytes.
+Durability: flush `.dat`, then atomically replace `.idx` via write-temp +
+rename (never delete-the-live-index-first). Data + equality indexes share
+**one** index commit per `put`/`delete`/`putAll`. Logical append offset
+comes from the committed index so a crash mid-append cannot shift later
+writes into orphan junk. Compact swaps `.dat` with rename-over / backup
+dance — it does not delete the live data file before the new one is in place.
 
 Growth control:
 
@@ -88,6 +93,16 @@ Growth control:
 5. All engine operations on a collection are serialized (per-collection
    async lock), so concurrent `put`/`delete`/`compact` calls can't race and
    corrupt the `.dat`/`.idx` files
+
+### Honesty vs SQLite
+
+This is a young, purpose-built engine — not a drop-in for SQLite/SQLCipher.
+We close the usual first-order footguns (interleaved awaits, plaintext
+indexes, delete-before-rename, put-then-index double commits, FD leaks on
+re-open, orphan trailing bytes after a crash). We have **not** had decades
+of power-loss / filesystem / multi-process stress testing. Prefer it for
+encrypted offline app documents and caches; keep using SQLite when you need
+that battle history, complex queries, or multi-process writers.
 
 For files and media (images, PDFs, downloaded attachments) too large or
 write-heavy for the document engine, use `VorzBlobStore` instead of putting

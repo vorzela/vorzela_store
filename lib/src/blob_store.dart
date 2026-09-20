@@ -219,8 +219,18 @@ class VorzBlobStore {
     await raf.close();
 
     final target = _fileFor(key);
-    if (await target.exists()) await target.delete();
-    await tmpFile.rename(target.path);
+    // Prefer rename-over on POSIX so we never delete the live blob before
+    // the new one is in place (crash window).
+    if (await target.exists()) {
+      if (Platform.isWindows) {
+        await target.delete();
+        await tmpFile.rename(target.path);
+      } else {
+        await tmpFile.rename(target.path);
+      }
+    } else {
+      await tmpFile.rename(target.path);
+    }
 
     final meta = BlobMeta(
       key: key,
