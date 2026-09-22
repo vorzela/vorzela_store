@@ -1,0 +1,11 @@
+analyzer:
+  plugins:
+    - custom_lint
+include: package:flutter_lints/flutter.yaml
+custom_lint:
+  rules:
+    - avoid_temporary_directory_for_vorz_store
+    - avoid_vorz_store_open_memory_in_app
+    - prefer_vorz_blob_store_for_bytes
+    - prefer_store_models_helper
+    - prefer_wipe_keys_then_close

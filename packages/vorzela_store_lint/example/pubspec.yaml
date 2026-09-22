@@ -1,0 +1,20 @@
+name: vorzela_store_lint_example
+publish_to: none
+environment:
+  sdk: ^3.5.0
+  flutter: ">=3.16.0"
+dependencies:
+  flutter:
+    sdk: flutter
+  path_provider: ^2.1.5
+  vorzela_store:
+    path: ../../..
+dev_dependencies:
+  custom_lint: ^0.8.1
+  vorzela_store_lint:
+    path: ..
+  flutter_lints: ^5.0.0
+
+dependency_overrides:
+  vorzela_json:
+    path: ../../../../vorzela_json

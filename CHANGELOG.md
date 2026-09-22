@@ -1,3 +1,10 @@
+## 0.0.4
+
+### Added
+- **`packages/vorzela_store_lint`** — `custom_lint` rules so stores stay
+  reboot-safe (Application Support, no tmp/cache), prefer `VorzBlobStore`
+  for bytes, `models()` helper, and `wipeKeys` → `close`.
+
 ## 0.0.3
 
 **Fixes (durability / crash windows)**

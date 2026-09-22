@@ -1,0 +1,19 @@
+name: vorzela_store_lint
+description: custom_lint rules for vorzela_store best practices.
+version: 0.1.0
+homepage: https://github.com/vorzela/vorzela_store
+repository: https://github.com/vorzela/vorzela_store
+license: MIT
+
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  analyzer: ^8.0.0
+  analyzer_plugin: ^0.13.0
+  custom_lint_builder: ^0.8.1
+
+dev_dependencies:
+  custom_lint: ^0.8.1
+  lints: ^5.0.0
+  test: ^1.25.0

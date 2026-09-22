@@ -180,6 +180,21 @@ No Hive, Isar, ObjectBox, or SQLite.
 
 ---
 
+## Linter (best practices)
+
+Use [`vorzela_store_lint`](packages/vorzela_store_lint) with `custom_lint` ^0.8.1
+so durable, reboot-safe usage stays correct:
+
+- never put `VorzStore.open(directory:)` under tmp / cache dirs
+- no `openMemory` in app code (tests only)
+- large `bytes` → `VorzBlobStore`, not document collections
+- prefer `store.models()` over manual `collection(fromJson:)`
+- after `wipeKeys()`, `close()` before reopening
+
+See [packages/vorzela_store_lint/README.md](packages/vorzela_store_lint/README.md).
+
+---
+
 ## Tests
 
 ```bash
